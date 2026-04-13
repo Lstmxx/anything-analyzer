@@ -1,11 +1,13 @@
 import type { CapturedRequest, JsHookRecord, StorageSnapshot, AssembledData, FilteredRequest, StorageDiff, AuthChainItem } from '@shared/types'
 import type { RequestsRepo, JsHooksRepo, StorageSnapshotsRepo } from '../db/repositories'
 import { SceneDetector } from './scene-detector'
+import { CryptoScriptExtractor } from './crypto-script-extractor'
 
 const STATIC_EXTENSIONS = /\.(js|css|png|jpg|jpeg|gif|svg|woff|woff2|ttf|eot|ico|map)(\?|$)/i
 const API_CONTENT_TYPES = ['json', 'form-urlencoded', 'multipart']
 const TOKEN_BUDGET = 30000
 const CHARS_PER_TOKEN = 4
+const CRYPTO_BUDGET_CHARS = 20000
 
 /**
  * DataAssembler — Reads session data from SQLite, filters, associates, and budgets it.
@@ -38,6 +40,11 @@ export class DataAssembler {
     }
 
     this.applyTokenBudget(assembledRequests)
+
+    // Extract crypto-related JS snippets from stored JS response bodies
+    const cryptoExtractor = new CryptoScriptExtractor(this.requestsRepo, this.jsHooksRepo)
+    const cryptoScripts = cryptoExtractor.extract(sessionId, CRYPTO_BUDGET_CHARS)
+
     const estimatedTokens = this.estimateTokens(assembledRequests, storageDiff)
 
     return {
@@ -52,7 +59,8 @@ export class DataAssembler {
           return rawReq?.is_streaming || rawReq?.is_websocket
         })
       })(),
-      authChain: this.extractAuthChain(assembledRequests)
+      authChain: this.extractAuthChain(assembledRequests),
+      cryptoScripts,
     }
   }
 

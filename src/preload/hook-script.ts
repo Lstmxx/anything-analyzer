@@ -81,6 +81,181 @@
     }
   }
 
+  // ---- Third-party crypto library hooks ----
+
+  function truncateArg(val: unknown): string {
+    const s = typeof val === 'string' ? val : JSON.stringify(val)
+    return s && s.length > 500 ? s.substring(0, 500) + '...' : (s || '')
+  }
+
+  function wrapMethod(obj: any, methodName: string, libLabel: string): void {
+    if (typeof obj[methodName] !== 'function') return
+    const original = obj[methodName]
+    obj[methodName] = function(this: any, ...args: any[]) {
+      const stack = getCallStack()
+      const truncatedArgs = args.map(a => truncateArg(a))
+      sendHookData('crypto_lib', `${libLabel}.${methodName}`, truncatedArgs, null, stack)
+      try {
+        const result = original.apply(this, args)
+        if (result && typeof result === 'object' && typeof result.toString === 'function') {
+          sendHookData('crypto_lib', `${libLabel}.${methodName}.result`, truncatedArgs, truncateArg(result.toString()), null)
+        }
+        return result
+      } catch (e) {
+        throw e
+      }
+    }
+  }
+
+  function hookCryptoJS(CryptoJS: any): void {
+    if (!CryptoJS || CryptoJS._arHooked) return
+    CryptoJS._arHooked = true
+
+    // AES / DES / TripleDES / Rabbit / RC4
+    for (const cipher of ['AES', 'DES', 'TripleDES', 'Rabbit', 'RC4']) {
+      if (CryptoJS[cipher]) {
+        wrapMethod(CryptoJS[cipher], 'encrypt', `CryptoJS.${cipher}`)
+        wrapMethod(CryptoJS[cipher], 'decrypt', `CryptoJS.${cipher}`)
+      }
+    }
+
+    // Hash functions
+    for (const hash of ['MD5', 'SHA1', 'SHA256', 'SHA512', 'SHA3', 'RIPEMD160']) {
+      if (typeof CryptoJS[hash] === 'function') {
+        const original = CryptoJS[hash]
+        CryptoJS[hash] = function(...args: any[]) {
+          const stack = getCallStack()
+          sendHookData('crypto_lib', `CryptoJS.${hash}`, args.map(a => truncateArg(a)), null, stack)
+          const result = original.apply(this, args)
+          sendHookData('crypto_lib', `CryptoJS.${hash}.result`, [], truncateArg(result?.toString()), null)
+          return result
+        }
+      }
+    }
+
+    // HMAC functions
+    for (const hmac of ['HmacSHA1', 'HmacSHA256', 'HmacSHA512', 'HmacMD5']) {
+      if (typeof CryptoJS[hmac] === 'function') {
+        const original = CryptoJS[hmac]
+        CryptoJS[hmac] = function(...args: any[]) {
+          const stack = getCallStack()
+          sendHookData('crypto_lib', `CryptoJS.${hmac}`, args.map(a => truncateArg(a)), null, stack)
+          const result = original.apply(this, args)
+          sendHookData('crypto_lib', `CryptoJS.${hmac}.result`, [], truncateArg(result?.toString()), null)
+          return result
+        }
+      }
+    }
+
+    // PBKDF2
+    if (typeof CryptoJS.PBKDF2 === 'function') {
+      const original = CryptoJS.PBKDF2
+      CryptoJS.PBKDF2 = function(...args: any[]) {
+        const stack = getCallStack()
+        sendHookData('crypto_lib', 'CryptoJS.PBKDF2', args.map(a => truncateArg(a)), null, stack)
+        const result = original.apply(this, args)
+        sendHookData('crypto_lib', 'CryptoJS.PBKDF2.result', [], truncateArg(result?.toString()), null)
+        return result
+      }
+    }
+
+    // enc.Base64 / enc.Hex
+    if (CryptoJS.enc) {
+      for (const enc of ['Base64', 'Hex', 'Utf8', 'Latin1']) {
+        if (CryptoJS.enc[enc]) {
+          wrapMethod(CryptoJS.enc[enc], 'stringify', `CryptoJS.enc.${enc}`)
+          wrapMethod(CryptoJS.enc[enc], 'parse', `CryptoJS.enc.${enc}`)
+        }
+      }
+    }
+  }
+
+  function hookJSEncrypt(JSEncryptClass: any): void {
+    if (!JSEncryptClass || JSEncryptClass._arHooked) return
+    JSEncryptClass._arHooked = true
+    const proto = JSEncryptClass.prototype
+    if (proto) {
+      for (const method of ['encrypt', 'decrypt', 'sign', 'verify', 'setPublicKey', 'setPrivateKey']) {
+        wrapMethod(proto, method, 'JSEncrypt')
+      }
+    }
+  }
+
+  function hookForge(forge: any): void {
+    if (!forge || forge._arHooked) return
+    forge._arHooked = true
+    if (forge.pki) {
+      wrapMethod(forge.pki, 'publicKeyFromPem', 'forge.pki')
+      wrapMethod(forge.pki, 'privateKeyFromPem', 'forge.pki')
+      wrapMethod(forge.pki, 'certificateFromPem', 'forge.pki')
+    }
+    if (forge.cipher) {
+      wrapMethod(forge.cipher, 'createCipher', 'forge.cipher')
+      wrapMethod(forge.cipher, 'createDecipher', 'forge.cipher')
+    }
+    if (forge.md) {
+      for (const alg of ['sha256', 'sha1', 'sha512', 'md5']) {
+        if (forge.md[alg]) wrapMethod(forge.md[alg], 'create', `forge.md.${alg}`)
+      }
+    }
+    if (forge.util) {
+      wrapMethod(forge.util, 'encode64', 'forge.util')
+      wrapMethod(forge.util, 'decode64', 'forge.util')
+    }
+    if (forge.hmac) {
+      wrapMethod(forge.hmac, 'create', 'forge.hmac')
+    }
+  }
+
+  function hookSmCrypto(name: string, obj: any): void {
+    if (!obj || obj._arHooked) return
+    obj._arHooked = true
+    for (const method of ['doEncrypt', 'doDecrypt', 'doSignature', 'doVerifySignature', 'encrypt', 'decrypt']) {
+      wrapMethod(obj, method, name)
+    }
+  }
+
+  // Trap library globals: fires when library is assigned to window
+  function trapGlobal(name: string, hookFn: (lib: any) => void): void {
+    // If already present, hook immediately
+    if ((window as any)[name]) {
+      try { hookFn((window as any)[name]) } catch { /* ignore */ }
+      return
+    }
+    // Set a defineProperty trap for lazy loading
+    let _val: any = undefined
+    try {
+      Object.defineProperty(window, name, {
+        get() { return _val },
+        set(v) {
+          _val = v
+          if (v) { try { hookFn(v) } catch { /* ignore */ } }
+        },
+        configurable: true,
+        enumerable: true,
+      })
+    } catch { /* CSP or frozen global */ }
+  }
+
+  trapGlobal('CryptoJS', hookCryptoJS)
+  trapGlobal('JSEncrypt', hookJSEncrypt)
+  trapGlobal('forge', hookForge)
+  trapGlobal('sm2', (obj) => hookSmCrypto('sm2', obj))
+  trapGlobal('sm3', (obj) => hookSmCrypto('sm3', obj))
+  trapGlobal('sm4', (obj) => hookSmCrypto('sm4', obj))
+
+  // Hook native btoa/atob
+  const originalBtoa = window.btoa
+  const originalAtob = window.atob
+  window.btoa = function(data: string): string {
+    sendHookData('crypto_lib', 'btoa', { data: truncateArg(data) }, null, getCallStack())
+    return originalBtoa.call(window, data)
+  }
+  window.atob = function(data: string): string {
+    sendHookData('crypto_lib', 'atob', { data: truncateArg(data) }, null, getCallStack())
+    return originalAtob.call(window, data)
+  }
+
   // Hook: document.cookie setter
   const cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie')
   if (cookieDesc) {

@@ -1,8 +1,10 @@
 import type {
   AssembledData,
+  CryptoScriptSnippet,
   SceneHint,
   AuthChainItem,
   FilteredRequest,
+  PromptTemplate,
 } from "@shared/types";
 
 interface PromptMessages {
@@ -28,6 +30,12 @@ const PERFORMANCE_REQUIREMENTS = `1. 请求时序分析：分析请求的串行/
 4. 缓存策略：分析 Cache-Control、ETag 等缓存头的使用情况
 5. 性能建议：给出具体的性能优化建议和预期收益`;
 
+const CRYPTO_REVERSE_REQUIREMENTS = `1. 加密算法识别：识别所有使用的加密/签名/哈希算法（AES、RSA、SHA、HMAC、SM2/3/4 等），标注具体库和方法名
+2. 加密流程还原：完整描述每个请求参数的加密 pipeline（明文 → 各步骤 → 密文），画出数据流转图
+3. 密钥管理分析：密钥来源（硬编码/动态/协商）、密钥格式（Hex/Base64/PEM）、密钥长度
+4. 签名/校验机制：请求签名的生成算法、参与签名的参数排序规则、时间戳/nonce 机制
+5. 复现代码：用 Python 写出完整的加密/签名/请求复现代码，确保可直接运行，包含所有必要的密钥和参数`;
+
 const DEFAULT_REQUIREMENTS = `1. 场景识别：判断用户执行了什么操作（注册、登录、AI对话、支付等）
 2. 交互流程概述：按时间顺序描述完整交互链路
 3. API端点清单：列出所有关键API，标注方法、路径、用途
@@ -45,10 +53,13 @@ export class PromptBuilder {
     data: AssembledData,
     platformName: string,
     purpose?: string,
+    template?: PromptTemplate,
   ): PromptMessages {
-    const system = `你是一位网站协议分析专家。你的任务是分析用户在网站上的操作过程中产生的HTTP请求、JS调用和存储变化，识别其业务场景，并生成结构化的协议分析报告。Be precise and technical. Output in Chinese (Simplified).`;
+    const system = template?.systemPrompt
+      || `你是一位网站协议分析专家。你的任务是分析用户在网站上的操作过程中产生的HTTP请求、JS调用和存储变化，识别其业务场景，并生成结构化的协议分析报告。Be precise and technical. Output in Chinese (Simplified).`;
 
-    const analysisRequirements = this.buildAnalysisRequirements(purpose);
+    const analysisRequirements = template?.requirements
+      || this.buildAnalysisRequirements(purpose);
     const requestsSection = this.formatRequests(data.requests);
     const hooksSection = this.formatHooks(data.requests);
     const storageSection = this.formatStorageDiff(data.storageDiff);
@@ -57,6 +68,8 @@ export class PromptBuilder {
     const streamingSection = this.formatStreamingRequests(
       data.streamingRequests,
     );
+    const cryptoHooksSection = this.formatCryptoHooks(data.requests);
+    const cryptoScriptsSection = this.formatCryptoScripts(data.cryptoScripts);
 
     const user = `以下是用户在 ${platformName} 上操作时的完整数据。
 
@@ -74,6 +87,12 @@ ${requestsSection}
 
 ## JS Hook 数据
 ${hooksSection}
+
+## 加密操作记录
+${cryptoHooksSection}
+
+## 相关加密代码片段
+${cryptoScriptsSection}
 
 ## 存储变化
 ${storageSection}
@@ -93,6 +112,7 @@ ${analysisRequirements}`;
       "reverse-api": REVERSE_API_REQUIREMENTS,
       "security-audit": SECURITY_AUDIT_REQUIREMENTS,
       performance: PERFORMANCE_REQUIREMENTS,
+      "crypto-reverse": CRYPTO_REVERSE_REQUIREMENTS,
     };
 
     if (predefinedMap[purpose]) {
@@ -182,6 +202,46 @@ ${DEFAULT_REQUIREMENTS}`;
       if (parts.length > 0) sections.push(`${type}:\n${parts.join("\n")}`);
     }
     return sections.length > 0 ? sections.join("\n\n") : "(无存储变化)";
+  }
+
+  private formatCryptoHooks(requests: AssembledData['requests']): string {
+    const cryptoHooks = requests.flatMap(r => r.hooks).filter(
+      h => h.hook_type === 'crypto' || h.hook_type === 'crypto_lib'
+    );
+    if (cryptoHooks.length === 0) return '(无加密操作记录)';
+
+    // Group by function name
+    const groups = new Map<string, typeof cryptoHooks>();
+    for (const h of cryptoHooks) {
+      const key = h.function_name;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(h);
+    }
+
+    const lines: string[] = [];
+    for (const [funcName, hooks] of groups) {
+      lines.push(`- **${funcName}** (${hooks.length}次调用)`);
+      // Show up to 3 representative calls
+      for (const h of hooks.slice(0, 3)) {
+        const args = h.arguments.length > 200 ? h.arguments.substring(0, 200) + '...' : h.arguments;
+        const result = h.result ? (h.result.length > 200 ? h.result.substring(0, 200) + '...' : h.result) : '';
+        lines.push(`  args=${args}${result ? ` → ${result}` : ''}`);
+        if (h.call_stack) {
+          const topFrame = h.call_stack.split('\n')[0]?.trim();
+          if (topFrame) lines.push(`  来源: ${topFrame}`);
+        }
+      }
+      if (hooks.length > 3) lines.push(`  ...及其他 ${hooks.length - 3} 次调用`);
+    }
+    return lines.join('\n');
+  }
+
+  private formatCryptoScripts(snippets: CryptoScriptSnippet[]): string {
+    if (!snippets || snippets.length === 0) return '(无相关加密代码)';
+    return snippets.map(s => {
+      const patterns = s.matchedPatterns.join(', ');
+      return `### ${s.scriptUrl} (行 ${s.lineRange[0]}-${s.lineRange[1]})\n匹配: ${patterns}\n\`\`\`javascript\n${s.content}\n\`\`\``;
+    }).join('\n\n');
   }
 
   private filterHeaders(

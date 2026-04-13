@@ -27,12 +27,14 @@ function createMinimalData(): AssembledData {
     sceneHints: [],
     streamingRequests: [],
     authChain: [],
+    cryptoScripts: [],
   };
 }
 
 describe("PromptBuilder", () => {
   const builder = new PromptBuilder();
   const data = createMinimalData();
+  const minimalData = data;
   const platform = "example.com";
 
   describe("purpose=undefined (default)", () => {
@@ -122,4 +124,55 @@ describe("PromptBuilder", () => {
       expect(customResult.system).toBe(defaultResult.system);
     });
   });
+
+  it('should return CRYPTO_REVERSE_REQUIREMENTS for crypto-reverse purpose', () => {
+    const result = builder.build(minimalData, 'TestPlatform', 'crypto-reverse')
+    expect(result.user).toContain('加密算法识别')
+    expect(result.user).toContain('加密流程还原')
+    expect(result.user).toContain('密钥管理分析')
+    expect(result.user).toContain('Python')
+  })
+
+  it('should include crypto hooks section in prompt', () => {
+    const dataWithCryptoHooks: AssembledData = {
+      ...minimalData,
+      requests: [{
+        seq: 1, method: 'POST', url: 'https://example.com/api/login',
+        headers: {}, body: null, status: 200,
+        responseHeaders: null, responseBody: null,
+        hooks: [{
+          id: 1, session_id: 's1', timestamp: Date.now(),
+          hook_type: 'crypto_lib', function_name: 'CryptoJS.AES.encrypt',
+          arguments: '["data","key"]', result: '"U2FsdGVkX1..."',
+          call_stack: 'at encrypt (https://example.com/js/api.js:42:10)', related_request_id: null
+        }]
+      }],
+    }
+    const result = builder.build(dataWithCryptoHooks, 'TestPlatform')
+    expect(result.user).toContain('加密操作记录')
+    expect(result.user).toContain('CryptoJS.AES.encrypt')
+  })
+
+  it('should include crypto script snippets in prompt', () => {
+    const dataWithSnippets: AssembledData = {
+      ...minimalData,
+      cryptoScripts: [{
+        scriptUrl: 'https://example.com/js/crypto.js',
+        lineRange: [10, 40] as [number, number],
+        content: 'function encrypt(data) { return CryptoJS.AES.encrypt(data, key); }',
+        matchedPatterns: ['CryptoJS'],
+        tier: 1,
+      }],
+    }
+    const result = builder.build(dataWithSnippets, 'TestPlatform')
+    expect(result.user).toContain('相关加密代码片段')
+    expect(result.user).toContain('crypto.js')
+    expect(result.user).toContain('CryptoJS.AES.encrypt')
+  })
+
+  it('should show empty placeholders when no crypto data', () => {
+    const result = builder.build(minimalData, 'TestPlatform')
+    expect(result.user).toContain('(无加密操作记录)')
+    expect(result.user).toContain('(无相关加密代码)')
+  })
 });

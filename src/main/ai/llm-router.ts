@@ -1,4 +1,5 @@
 import type { LLMProviderConfig } from "@shared/types";
+import type { MCPToolInfo } from "../mcp/mcp-manager";
 
 interface LLMResponse {
   content: string;
@@ -7,9 +8,34 @@ interface LLMResponse {
 }
 
 interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  // OpenAI tool call fields
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  name?: string;
 }
+
+interface ToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+// Anthropic content block types
+interface AnthropicTextBlock {
+  type: "text";
+  text: string;
+}
+
+interface AnthropicToolUseBlock {
+  type: "tool_use";
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+}
+
+type AnthropicContentBlock = AnthropicTextBlock | AnthropicToolUseBlock;
 
 const DEFAULT_TIMEOUT = 120000; // 2 minutes for initial connection + first response
 
@@ -31,6 +57,240 @@ export class LLMRouter {
       return this.completeResponses(messages, onChunk);
     }
     return this.completeOpenAI(messages, onChunk);
+  }
+
+  /**
+   * Agentic loop: LLM ↔ tool calls via MCP.
+   * Uses non-streaming for tool-call rounds, streams only the final text response.
+   */
+  async completeWithTools(
+    messages: ChatMessage[],
+    tools: MCPToolInfo[],
+    callTool: (name: string, args: Record<string, unknown>) => Promise<string>,
+    onChunk?: (chunk: string) => void,
+    maxRounds = 10,
+  ): Promise<LLMResponse> {
+    if (this.config.name === "anthropic") {
+      return this.agenticLoopAnthropic(messages, tools, callTool, onChunk, maxRounds);
+    }
+    return this.agenticLoopOpenAI(messages, tools, callTool, onChunk, maxRounds);
+  }
+
+  // ---- Agentic Loop: OpenAI / Custom ----
+
+  private async agenticLoopOpenAI(
+    messages: ChatMessage[],
+    tools: MCPToolInfo[],
+    callTool: (name: string, args: Record<string, unknown>) => Promise<string>,
+    onChunk?: (chunk: string) => void,
+    maxRounds = 10,
+  ): Promise<LLMResponse> {
+    const openaiTools = tools.map((t) => ({
+      type: "function" as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema,
+      },
+    }));
+
+    const history = [...messages];
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+
+    for (let round = 0; round < maxRounds; round++) {
+      const url = `${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`;
+      const body = {
+        model: this.config.model,
+        messages: history.map((m) => {
+          const msg: Record<string, unknown> = { role: m.role, content: m.content };
+          if (m.tool_calls) msg.tool_calls = m.tool_calls;
+          if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+          if (m.name) msg.name = m.name;
+          return msg;
+        }),
+        max_tokens: this.config.maxTokens,
+        tools: openaiTools,
+        stream: false,
+      };
+
+      const response = await this.fetchWithRetry(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+      });
+
+      const data = (await response.json()) as {
+        choices: Array<{
+          message: {
+            content: string | null;
+            tool_calls?: ToolCall[];
+            role: string;
+          };
+          finish_reason: string;
+        }>;
+        usage?: { prompt_tokens: number; completion_tokens: number };
+      };
+
+      totalPromptTokens += data.usage?.prompt_tokens || 0;
+      totalCompletionTokens += data.usage?.completion_tokens || 0;
+
+      const choice = data.choices[0];
+      if (!choice) throw new Error("No response from LLM");
+
+      const assistantMsg = choice.message;
+
+      // Has tool calls → execute and continue loop
+      if (assistantMsg.tool_calls && assistantMsg.tool_calls.length > 0) {
+        history.push({
+          role: "assistant",
+          content: assistantMsg.content || "",
+          tool_calls: assistantMsg.tool_calls,
+        });
+
+        // 通知前端正在调用工具
+        if (onChunk) {
+          const toolNames = assistantMsg.tool_calls.map((tc) => tc.function.name).join(", ");
+          onChunk(`\n\n> 🔧 调用工具: ${toolNames}\n\n`);
+        }
+
+        for (const tc of assistantMsg.tool_calls) {
+          let result: string;
+          try {
+            const args = JSON.parse(tc.function.arguments);
+            result = await callTool(tc.function.name, args);
+          } catch (err) {
+            result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+          history.push({
+            role: "tool",
+            content: result,
+            tool_call_id: tc.id,
+            name: tc.function.name,
+          });
+        }
+        continue;
+      }
+
+      // No tool calls → this is the final answer
+      const content = assistantMsg.content || "";
+      if (onChunk && content) onChunk(content);
+      return {
+        content,
+        promptTokens: totalPromptTokens,
+        completionTokens: totalCompletionTokens,
+      };
+    }
+
+    // Max rounds exceeded — do final call without tools to force text response
+    return this.complete(history, onChunk);
+  }
+
+  // ---- Agentic Loop: Anthropic ----
+
+  private async agenticLoopAnthropic(
+    messages: ChatMessage[],
+    tools: MCPToolInfo[],
+    callTool: (name: string, args: Record<string, unknown>) => Promise<string>,
+    onChunk?: (chunk: string) => void,
+    maxRounds = 10,
+  ): Promise<LLMResponse> {
+    const anthropicTools = tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: t.inputSchema,
+    }));
+
+    const systemMsg = messages.find((m) => m.role === "system");
+    // Anthropic message format: role is "user" | "assistant", content can be array
+    const history: Array<{ role: string; content: string | AnthropicContentBlock[] | Array<{ type: string; tool_use_id?: string; content?: string }> }> = messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+
+    for (let round = 0; round < maxRounds; round++) {
+      const url = `${this.config.baseUrl.replace(/\/$/, "")}/messages`;
+      const body: Record<string, unknown> = {
+        model: this.config.model,
+        max_tokens: this.config.maxTokens,
+        messages: history,
+        tools: anthropicTools,
+        stream: false,
+      };
+      if (systemMsg) body.system = systemMsg.content;
+
+      const response = await this.fetchWithRetry(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": this.config.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+      });
+
+      const data = (await response.json()) as {
+        content: AnthropicContentBlock[];
+        stop_reason: string;
+        usage?: { input_tokens: number; output_tokens: number };
+      };
+
+      totalPromptTokens += data.usage?.input_tokens || 0;
+      totalCompletionTokens += data.usage?.output_tokens || 0;
+
+      const toolUseBlocks = data.content.filter(
+        (b): b is AnthropicToolUseBlock => b.type === "tool_use",
+      );
+
+      if (toolUseBlocks.length > 0) {
+        // Push assistant message with content blocks
+        history.push({ role: "assistant", content: data.content });
+
+        if (onChunk) {
+          const toolNames = toolUseBlocks.map((b) => b.name).join(", ");
+          onChunk(`\n\n> 🔧 调用工具: ${toolNames}\n\n`);
+        }
+
+        // Execute tools and push results
+        const toolResults: Array<{ type: "tool_result"; tool_use_id: string; content: string }> = [];
+        for (const block of toolUseBlocks) {
+          let result: string;
+          try {
+            result = await callTool(block.name, block.input);
+          } catch (err) {
+            result = `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: result,
+          });
+        }
+        history.push({ role: "user", content: toolResults });
+        continue;
+      }
+
+      // No tool use → extract text content as final answer
+      const textContent = data.content
+        .filter((b): b is AnthropicTextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("");
+
+      if (onChunk && textContent) onChunk(textContent);
+      return {
+        content: textContent,
+        promptTokens: totalPromptTokens,
+        completionTokens: totalCompletionTokens,
+      };
+    }
+
+    // Max rounds exceeded — final call without tools
+    return this.complete(messages, onChunk);
   }
 
   private async completeOpenAI(

@@ -231,9 +231,9 @@ export class SessionManager {
   /**
    * Delete a session.
    */
-  deleteSession(sessionId: string): void {
+  async deleteSession(sessionId: string): Promise<void> {
     if (this.currentSessionId === sessionId) {
-      this.stopCapture(sessionId);
+      await this.stopCapture(sessionId);
     }
     this.sessionsRepo.delete(sessionId);
   }

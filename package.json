@@ -1,6 +1,6 @@
 {
   "name": "anything-analyzer",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Universal web protocol analyzer with embedded browser and AI-powered analysis",
   "packageManager": "pnpm@10.24.0",
   "main": "./out/main/index.js",
@@ -15,8 +15,10 @@
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "antd": "^5.24.0",
     "better-sqlite3": "^11.8.1",
+    "electron-updater": "^6.8.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^9.0.3",

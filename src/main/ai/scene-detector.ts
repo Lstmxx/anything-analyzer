@@ -73,6 +73,16 @@ export class SceneDetector {
       if (this.isJsonResponse(req)) {
         this.addSceneHint(scenesMap, 'api-general', 'low', 'JSON API 请求/响应', req.seq)
       }
+
+      // 加密操作场景
+      if (this.hasCryptoHooks(req)) {
+        this.addSceneHint(scenesMap, 'crypto-encryption', 'high', '检测到加密/签名/哈希操作 Hook', req.seq)
+      }
+
+      // 签名请求头场景
+      if (this.hasSignatureHeaders(req)) {
+        this.addSceneHint(scenesMap, 'crypto-encryption', 'medium', '请求包含签名/加密相关 Header', req.seq)
+      }
     }
 
     return Array.from(scenesMap.values()).map(entry => entry.hint)
@@ -271,5 +281,22 @@ export class SceneDetector {
     } catch {
       return false
     }
+  }
+
+  /**
+   * 检查请求是否关联了加密类 Hook
+   */
+  private hasCryptoHooks(req: FilteredRequest): boolean {
+    return req.hooks.some(h => h.hook_type === 'crypto' || h.hook_type === 'crypto_lib')
+  }
+
+  /**
+   * 检查请求头中是否有签名/加密相关 Header
+   */
+  private hasSignatureHeaders(req: FilteredRequest): boolean {
+    const signatureHeaders = ['x-signature', 'x-sign', 'x-timestamp', 'x-nonce', 'x-request-sign', 'signature']
+    return Object.keys(req.headers || {}).some(
+      key => signatureHeaders.includes(key.toLowerCase())
+    )
   }
 }

@@ -1,15 +1,17 @@
-import React, { useEffect, useRef } from 'react'
-import { Alert, Button, Descriptions, Empty, Space, Spin, Typography } from 'antd'
+import React, { useEffect, useRef, useState } from 'react'
+import { Alert, Button, Descriptions, Empty, Input, Space, Spin, Tag, Typography } from 'antd'
 import {
   ReloadOutlined,
   RobotOutlined,
   FileTextOutlined,
-  ExportOutlined
+  ExportOutlined,
+  SendOutlined,
+  MessageOutlined
 } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import type { AnalysisReport } from '@shared/types'
+import type { AnalysisReport, ChatMessage } from '@shared/types'
 
 const { Text, Title } = Typography
 
@@ -19,6 +21,10 @@ interface ReportViewProps {
   analysisError: string | null
   streamingContent: string
   onReAnalyze: (purpose?: string) => void
+  chatHistory: ChatMessage[]
+  isChatting: boolean
+  chatError: string | null
+  onSendFollowUp: (message: string) => void
 }
 
 // Format token count for display
@@ -98,12 +104,76 @@ const ReportMeta: React.FC<{ report: AnalysisReport }> = ({ report }) => (
   </Descriptions>
 )
 
+// Quick follow-up suggestions
+const QUICK_QUESTIONS = [
+  '生成完整的 Python 复现代码',
+  '详细解释加密/签名流程',
+  '分析潜在的安全风险',
+  '列出所有 API 的请求参数和响应结构',
+]
+
+// Chat input component with quick suggestions
+const ChatInput: React.FC<{ onSend: (msg: string) => void; disabled: boolean }> = ({ onSend, disabled }) => {
+  const [input, setInput] = useState('')
+
+  const handleSend = () => {
+    const trimmed = input.trim()
+    if (!trimmed || disabled) return
+    onSend(trimmed)
+    setInput('')
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+        {QUICK_QUESTIONS.map((q, i) => (
+          <Tag
+            key={i}
+            color="default"
+            style={{ cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1 }}
+            onClick={() => { if (!disabled) onSend(q) }}
+          >
+            {q}
+          </Tag>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <Input.TextArea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="输入追问..."
+          autoSize={{ minRows: 1, maxRows: 4 }}
+          disabled={disabled}
+          onPressEnter={(e) => {
+            if (!e.shiftKey) {
+              e.preventDefault()
+              handleSend()
+            }
+          }}
+          style={{ flex: 1 }}
+        />
+        <Button
+          type="primary"
+          icon={<SendOutlined />}
+          onClick={handleSend}
+          disabled={disabled || !input.trim()}
+          style={{ alignSelf: 'flex-end' }}
+        />
+      </div>
+    </div>
+  )
+}
+
 const ReportView: React.FC<ReportViewProps> = ({
   report,
   isAnalyzing,
   analysisError,
   streamingContent,
-  onReAnalyze
+  onReAnalyze,
+  chatHistory,
+  isChatting,
+  chatError,
+  onSendFollowUp
 }) => {
   // Analyzing state: show streaming content or spinner
   if (isAnalyzing) {
@@ -179,57 +249,144 @@ const ReportView: React.FC<ReportViewProps> = ({
   const handleExport = async () => {
     if (!report) return
     const defaultName = `report-${new Date(report.created_at).toISOString().slice(0, 10)}-${report.llm_model}.md`
-    await window.electronAPI.exportFile(defaultName, report.report_content)
+
+    // Build export content: report + follow-up chat
+    let content = report.report_content
+    const followUps = chatHistory.slice(2) // skip initial system + user prompt
+    if (followUps.length > 0) {
+      content += '\n\n---\n\n## 追问对话\n'
+      for (const msg of followUps) {
+        const label = msg.role === 'user' ? '**用户**' : '**AI**'
+        content += `\n${label}:\n\n${msg.content}\n`
+      }
+    }
+
+    await window.electronAPI.exportFile(defaultName, content)
   }
 
   // Display completed report
   return (
-    <div style={{ padding: '8px 0' }}>
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: 12
-        }}
-      >
-        <Title level={5} style={{ margin: 0 }}>
-          <RobotOutlined style={{ marginRight: 8 }} />
-          协议分析报告
-        </Title>
-        <Space>
-          <Button
-            icon={<ExportOutlined />}
-            onClick={handleExport}
-            size="small"
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: '8px 0' }}>
+      {/* Scrollable report content */}
+      <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 12
+          }}
+        >
+          <Title level={5} style={{ margin: 0 }}>
+            <RobotOutlined style={{ marginRight: 8 }} />
+            协议分析报告
+          </Title>
+          <Space>
+            <Button
+              icon={<ExportOutlined />}
+              onClick={handleExport}
+              size="small"
+            >
+              Export .md
+            </Button>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={() => onReAnalyze()}
+              size="small"
+            >
+              Re-analyze
+            </Button>
+          </Space>
+        </div>
+
+        <ReportMeta report={report} />
+
+        <div
+          className="report-markdown-content"
+          style={{
+            padding: 16,
+            background: 'rgba(255, 255, 255, 0.02)',
+            borderRadius: 8,
+            overflowWrap: 'break-word',
+            wordBreak: 'break-word'
+          }}
+        >
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+            {report.report_content}
+          </ReactMarkdown>
+        </div>
+
+        {/* Chat history messages (scrollable with report) */}
+        {chatHistory.slice(2).map((msg, i) => (
+          <div
+            key={i}
+            style={{
+              marginTop: 12,
+              padding: '8px 12px',
+              borderRadius: 8,
+              background: msg.role === 'user'
+                ? 'rgba(22, 119, 255, 0.1)'
+                : 'rgba(255, 255, 255, 0.02)',
+              borderLeft: msg.role === 'user'
+                ? '3px solid #1677ff'
+                : '3px solid #52c41a',
+            }}
           >
-            Export .md
-          </Button>
-          <Button
-            icon={<ReloadOutlined />}
-            onClick={() => onReAnalyze()}
-            size="small"
-          >
-            Re-analyze
-          </Button>
-        </Space>
+            <Tag
+              color={msg.role === 'user' ? 'blue' : 'green'}
+              style={{ marginBottom: 4 }}
+            >
+              {msg.role === 'user' ? '你' : 'AI'}
+            </Tag>
+            <div className="report-markdown-content">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                {msg.content}
+              </ReactMarkdown>
+            </div>
+          </div>
+        ))}
+
+        {/* Streaming response */}
+        {isChatting && streamingContent && (
+          <div style={{
+            marginTop: 12,
+            padding: '8px 12px',
+            borderRadius: 8,
+            background: 'rgba(255, 255, 255, 0.02)',
+            borderLeft: '3px solid #52c41a',
+          }}>
+            <Tag color="green" style={{ marginBottom: 4 }}>AI</Tag>
+            <StreamingDisplay content={streamingContent} />
+          </div>
+        )}
+
+        {isChatting && !streamingContent && (
+          <div style={{ textAlign: 'center', padding: 12 }}>
+            <Spin size="small" />
+            <Text style={{ marginLeft: 8, color: 'rgba(255, 255, 255, 0.45)' }}>思考中...</Text>
+          </div>
+        )}
+
+        {chatError && (
+          <Alert
+            type="error"
+            showIcon
+            closable
+            message="追问失败"
+            description={chatError}
+            style={{ marginTop: 12 }}
+          />
+        )}
       </div>
 
-      <ReportMeta report={report} />
-
-      <div
-        className="report-markdown-content"
-        style={{
-          padding: 16,
-          background: 'rgba(255, 255, 255, 0.02)',
-          borderRadius: 8,
-          overflowWrap: 'break-word',
-          wordBreak: 'break-word'
-        }}
-      >
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-          {report.report_content}
-        </ReactMarkdown>
+      {/* Fixed chat input at bottom */}
+      <div style={{
+        flexShrink: 0,
+        borderTop: '1px solid rgba(255, 255, 255, 0.08)',
+        paddingTop: 10,
+        marginTop: 8,
+      }}>
+        <ChatInput onSend={onSendFollowUp} disabled={isChatting} />
       </div>
 
       <style>{`

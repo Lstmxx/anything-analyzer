@@ -54,6 +54,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // AI analysis
   startAnalysis: (sessionId: string, purpose?: string) =>
     ipcRenderer.invoke("ai:analyze", sessionId, purpose),
+  sendFollowUp: (sessionId: string, history: unknown[], userMessage: string) =>
+    ipcRenderer.invoke("ai:chat", sessionId, history, userMessage),
 
   // Browser bounds sync (renderer → main, fire-and-forget)
   syncBrowserBounds: (bounds: {
@@ -67,6 +69,28 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getLLMConfig: () => ipcRenderer.invoke("settings:getLLM"),
   saveLLMConfig: (config: unknown) =>
     ipcRenderer.invoke("settings:saveLLM", config),
+
+  // Auto update
+  getAppVersion: () => ipcRenderer.invoke("app:version"),
+  checkForUpdate: () => ipcRenderer.invoke("update:check"),
+  installUpdate: () => ipcRenderer.send("update:install"),
+  onUpdateStatus: (callback: (status: unknown) => void) => {
+    ipcRenderer.on("update:status", (_event, status) => callback(status));
+  },
+
+  // Prompt Templates
+  getPromptTemplates: () => ipcRenderer.invoke("templates:list"),
+  savePromptTemplate: (template: unknown) =>
+    ipcRenderer.invoke("templates:save", template),
+  deletePromptTemplate: (id: string) =>
+    ipcRenderer.invoke("templates:delete", id),
+  resetPromptTemplate: (id: string) =>
+    ipcRenderer.invoke("templates:reset", id),
+
+  // MCP Servers
+  getMCPServers: () => ipcRenderer.invoke("mcp:list"),
+  saveMCPServer: (server: unknown) => ipcRenderer.invoke("mcp:save", server),
+  deleteMCPServer: (id: string) => ipcRenderer.invoke("mcp:delete", id),
 
   // Tab events
   onTabCreated: (callback: (tab: unknown) => void) => {

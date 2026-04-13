@@ -65,7 +65,7 @@ function App(): React.ReactElement {
   /** Whether we are currently dragging the resize handle */
   const isDragging = useRef(false)
 
-  const { requests, hooks, snapshots, reports, isAnalyzing, analysisError, streamingContent, startAnalysis } = useCapture(currentSessionId)
+  const { requests, hooks, snapshots, reports, isAnalyzing, analysisError, streamingContent, startAnalysis, chatHistory, isChatting, chatError, sendFollowUp } = useCapture(currentSessionId)
 
   const selectedRequest = requests.find(r => r.id === selectedRequestId) || null
 
@@ -174,6 +174,11 @@ function App(): React.ReactElement {
     setActiveTab('report')
     await startAnalysis(currentSessionId, purpose)
   }, [currentSessionId, startAnalysis])
+
+  const handleFollowUp = useCallback(async (message: string) => {
+    if (!currentSessionId) return
+    await sendFollowUp(currentSessionId, message)
+  }, [currentSessionId, sendFollowUp])
 
   return (
     <ConfigProvider
@@ -352,6 +357,10 @@ function App(): React.ReactElement {
                         analysisError={analysisError}
                         streamingContent={streamingContent}
                         onReAnalyze={handleAnalyze}
+                        chatHistory={chatHistory}
+                        isChatting={isChatting}
+                        chatError={chatError}
+                        onSendFollowUp={handleFollowUp}
                       />
                     )
                   }

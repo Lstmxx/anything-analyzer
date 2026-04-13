@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Button, Input, Select, Space, Spin, Tag } from 'antd'
 import {
   PlayCircleOutlined,
@@ -9,8 +9,7 @@ import {
   CheckOutlined,
   CloseOutlined
 } from '@ant-design/icons'
-import type { SessionStatus } from '../../shared/types'
-import { ANALYSIS_PURPOSES } from '../../shared/types'
+import type { SessionStatus, PromptTemplate } from '../../shared/types'
 
 interface ControlBarProps {
   status: SessionStatus | null
@@ -34,6 +33,12 @@ const ControlBar: React.FC<ControlBarProps> = ({
   const [purposeId, setPurposeId] = useState<string>('auto')
   const [customText, setCustomText] = useState('')
   const [customExpanded, setCustomExpanded] = useState(false)
+  const [templates, setTemplates] = useState<PromptTemplate[]>([])
+
+  // Load templates from storage
+  useEffect(() => {
+    window.electronAPI.getPromptTemplates().then(setTemplates).catch(() => {})
+  }, [])
 
   const isRunning = status === 'running'
   const isPaused = status === 'paused'
@@ -58,7 +63,6 @@ const ControlBar: React.FC<ControlBarProps> = ({
 
   const handleCustomCancel = () => {
     setCustomExpanded(false)
-    // 如果之前不是 custom，恢复原选择
     if (purposeId !== 'custom') {
       setCustomText('')
     }
@@ -73,6 +77,12 @@ const ControlBar: React.FC<ControlBarProps> = ({
       onAnalyze(purposeId)
     }
   }
+
+  // Build select options from templates + custom
+  const selectOptions = [
+    ...templates.map(t => ({ label: t.name, value: t.id })),
+    { label: '自定义...', value: 'custom' },
+  ]
 
   return (
     <div style={{ flexShrink: 0, background: '#1a1a1a', borderBottom: '1px solid #303030' }}>
@@ -127,10 +137,7 @@ const ControlBar: React.FC<ControlBarProps> = ({
             onChange={handlePurposeChange}
             style={{ width: 160 }}
             disabled={isAnalyzing}
-            options={ANALYSIS_PURPOSES.map(p => ({
-              label: p.label,
-              value: p.value,
-            }))}
+            options={selectOptions}
           />
 
           <Button

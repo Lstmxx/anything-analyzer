@@ -13,8 +13,11 @@ import { SessionManager } from "./session/session-manager";
 import { AiAnalyzer } from "./ai/ai-analyzer";
 import { WindowManager } from "./window";
 import { registerIpcHandlers } from "./ipc";
+import { Updater } from "./updater";
+import { MCPClientManager } from "./mcp/mcp-manager";
 
 const windowManager = new WindowManager();
+const mcpManager = new MCPClientManager();
 
 app.whenReady().then(() => {
   // Initialize database
@@ -56,21 +59,36 @@ app.whenReady().then(() => {
   // Initialize tab manager with first tab
   windowManager.initTabs();
 
+  // Initialize auto-updater
+  const updater = new Updater();
+  const mainWin = windowManager.getMainWindow();
+  if (mainWin) updater.setMainWindow(mainWin);
+
+  // Inject MCP client manager into AI analyzer
+  aiAnalyzer.setMCPManager(mcpManager);
+
   // Register IPC handlers
   registerIpcHandlers({
     sessionManager,
     aiAnalyzer,
     windowManager,
+    updater,
+    mcpManager,
     requestsRepo,
     jsHooksRepo,
     storageSnapshotsRepo,
     reportsRepo,
   });
 
+  // Check for updates on startup (non-blocking, delayed 3s)
+  setTimeout(() => updater.checkForUpdates(), 3000);
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       windowManager.createMainWindow();
       windowManager.initTabs();
+      const win = windowManager.getMainWindow();
+      if (win) updater.setMainWindow(win);
     }
   });
 });
@@ -82,5 +100,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  mcpManager.disconnectAll().catch(() => {});
   closeDatabase();
 });

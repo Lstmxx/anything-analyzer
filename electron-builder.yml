@@ -8,6 +8,10 @@ files:
   - '!electron.vite.config.*'
   - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+publish:
+  provider: github
+  owner: Mouseww
+  repo: anything-analyzer
 win:
   target:
     - nsis
@@ -17,6 +21,7 @@ nsis:
 mac:
   target:
     - dmg
+    - zip
   artifactName: "${productName}-${version}-${arch}.${ext}"
 linux:
   target:

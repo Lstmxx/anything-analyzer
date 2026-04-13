@@ -66,7 +66,10 @@ jobs:
           path: |
             dist/*.exe
             dist/*.dmg
+            dist/*.zip
             dist/*.AppImage
+            dist/*.yml
+            dist/*.blockmap
           if-no-files-found: error
 
   release:
@@ -84,14 +87,17 @@ jobs:
           merge-multiple: true
 
       - name: List artifacts
-        run: find artifacts -type f | head -20
+        run: find artifacts -type f | head -30
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          draft: false
           generate_release_notes: true
           files: |
             artifacts/*.exe
             artifacts/*.dmg
+            artifacts/*.zip
             artifacts/*.AppImage
+            artifacts/*.yml
+            artifacts/*.blockmap

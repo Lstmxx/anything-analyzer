@@ -4,6 +4,7 @@ import type {
   JsHookRecord,
   StorageSnapshot,
   AnalysisReport,
+  ChatMessage,
 } from "@shared/types";
 import { IPC_CHANNELS } from "@shared/types";
 
@@ -16,6 +17,9 @@ interface UseCaptureState {
   analysisError: string | null;
   streamingContent: string;
   selectedRequest: CapturedRequest | null;
+  chatHistory: ChatMessage[];
+  isChatting: boolean;
+  chatError: string | null;
 }
 
 interface UseCaptureReturn extends UseCaptureState {
@@ -23,6 +27,7 @@ interface UseCaptureReturn extends UseCaptureState {
   clearData: () => void;
   selectRequest: (request: CapturedRequest | null) => void;
   startAnalysis: (sessionId: string, purpose?: string) => Promise<void>;
+  sendFollowUp: (sessionId: string, message: string) => Promise<void>;
 }
 
 const INITIAL_STATE: UseCaptureState = {
@@ -34,6 +39,9 @@ const INITIAL_STATE: UseCaptureState = {
   analysisError: null,
   streamingContent: "",
   selectedRequest: null,
+  chatHistory: [],
+  isChatting: false,
+  chatError: null,
 };
 
 export function useCapture(sessionId: string | null): UseCaptureReturn {
@@ -99,6 +107,11 @@ export function useCapture(sessionId: string | null): UseCaptureReturn {
           isAnalyzing: false,
           streamingContent: "",
           reports: [report, ...prev.reports],
+          chatHistory: [
+            { role: 'system' as const, content: '你是一位网站协议分析专家。基于之前的分析报告和捕获数据，回答用户的追问。保持技术精确，用中文回复。' },
+            { role: 'assistant' as const, content: report.report_content },
+          ],
+          chatError: null,
         }));
       }
     } catch (err) {
@@ -110,6 +123,45 @@ export function useCapture(sessionId: string | null): UseCaptureReturn {
           isAnalyzing: false,
           streamingContent: "",
           analysisError: errMsg,
+        }));
+      }
+    }
+  }, []);
+
+  const chatHistoryRef = useRef<ChatMessage[]>([]);
+  useEffect(() => {
+    chatHistoryRef.current = state.chatHistory;
+  }, [state.chatHistory]);
+
+  const sendFollowUp = useCallback(async (sid: string, message: string) => {
+    setState((prev) => ({
+      ...prev,
+      isChatting: true,
+      chatError: null,
+      streamingContent: "",
+      chatHistory: [...prev.chatHistory, { role: 'user' as const, content: message }],
+    }));
+
+    try {
+      const reply = await window.electronAPI.sendFollowUp(sid, chatHistoryRef.current, message);
+
+      if (sessionIdRef.current === sid) {
+        setState((prev) => ({
+          ...prev,
+          isChatting: false,
+          streamingContent: "",
+          chatHistory: [...prev.chatHistory, { role: 'assistant' as const, content: reply }],
+        }));
+      }
+    } catch (err) {
+      console.error("Follow-up chat failed:", err);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (sessionIdRef.current === sid) {
+        setState((prev) => ({
+          ...prev,
+          isChatting: false,
+          streamingContent: "",
+          chatError: errMsg,
         }));
       }
     }
@@ -169,6 +221,7 @@ export function useCapture(sessionId: string | null): UseCaptureReturn {
     clearData,
     selectRequest,
     startAnalysis,
+    sendFollowUp,
   };
 }
 

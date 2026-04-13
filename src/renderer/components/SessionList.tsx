@@ -1,8 +1,7 @@
 import React, { useState } from 'react'
-import { List, Button, Badge, Typography, Modal, Form, Input, Dropdown, Empty } from 'antd'
+import { List, Button, Badge, Typography, Modal, Form, Input, Empty } from 'antd'
 import { PlusOutlined, GlobalOutlined, DeleteOutlined } from '@ant-design/icons'
 import type { Session } from '../../shared/types'
-import type { MenuProps } from 'antd'
 
 const { Text } = Typography
 
@@ -31,7 +30,8 @@ const SessionList: React.FC<SessionListProps> = ({
   const [modalOpen, setModalOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [form] = Form.useForm()
-  const [contextMenuSessionId, setContextMenuSessionId] = useState<string | null>(null)
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const openModal = () => {
     setModalOpen(true)
@@ -59,25 +59,17 @@ const SessionList: React.FC<SessionListProps> = ({
     }
   }
 
-  const handleDelete = async (id: string) => {
-    Modal.confirm({
-      title: 'Delete Session',
-      content: 'Are you sure you want to delete this session? All captured data will be lost.',
-      okText: 'Delete',
-      okButtonProps: { danger: true },
-      onOk: () => onDelete(id)
-    })
-  }
-
-  const getContextMenuItems = (sessionId: string): MenuProps['items'] => [
-    {
-      key: 'delete',
-      label: 'Delete',
-      icon: <DeleteOutlined />,
-      danger: true,
-      onClick: () => handleDelete(sessionId)
+  const handleDelete = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation()
+    setDeletingId(id)
+    try {
+      await onDelete(id)
+    } catch {
+      // delete failed
+    } finally {
+      setDeletingId(null)
     }
-  ]
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
@@ -108,39 +100,29 @@ const SessionList: React.FC<SessionListProps> = ({
           <List
             dataSource={sessions}
             renderItem={(session) => (
-              <Dropdown
-                menu={{ items: getContextMenuItems(session.id) }}
-                trigger={['contextMenu']}
-                onOpenChange={(open) => {
-                  if (open) setContextMenuSessionId(session.id)
+              <List.Item
+                onClick={() => onSelect(session.id)}
+                onMouseEnter={() => setHoveredId(session.id)}
+                onMouseLeave={() => setHoveredId(null)}
+                style={{
+                  padding: '10px 16px',
+                  cursor: 'pointer',
+                  background:
+                    session.id === currentSessionId
+                      ? 'rgba(22, 119, 255, 0.15)'
+                      : session.id === hoveredId
+                        ? 'rgba(255,255,255,0.04)'
+                        : 'transparent',
+                  borderLeft:
+                    session.id === currentSessionId
+                      ? '3px solid #1677ff'
+                      : '3px solid transparent',
+                  borderBottom: '1px solid #303030',
+                  transition: 'background 0.2s'
                 }}
               >
-                <List.Item
-                  onClick={() => onSelect(session.id)}
-                  style={{
-                    padding: '10px 16px',
-                    cursor: 'pointer',
-                    background:
-                      session.id === currentSessionId ? 'rgba(22, 119, 255, 0.15)' : 'transparent',
-                    borderLeft:
-                      session.id === currentSessionId
-                        ? '3px solid #1677ff'
-                        : '3px solid transparent',
-                    borderBottom: '1px solid #303030',
-                    transition: 'background 0.2s'
-                  }}
-                  onMouseEnter={(e) => {
-                    if (session.id !== currentSessionId) {
-                      ;(e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.04)'
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (session.id !== currentSessionId) {
-                      ;(e.currentTarget as HTMLElement).style.background = 'transparent'
-                    }
-                  }}
-                >
-                  <div style={{ width: '100%', minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', width: '100%', minWidth: 0 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     <div
                       style={{
                         display: 'flex',
@@ -172,8 +154,33 @@ const SessionList: React.FC<SessionListProps> = ({
                       {session.target_url}
                     </Text>
                   </div>
-                </List.Item>
-              </Dropdown>
+
+                  {/* Hover 时显示删除按钮 */}
+                  {hoveredId === session.id && (
+                    <DeleteOutlined
+                      onClick={(e) => handleDelete(e, session.id)}
+                      style={{
+                        color: deletingId === session.id ? '#595959' : '#8c8c8c',
+                        fontSize: 13,
+                        flexShrink: 0,
+                        marginLeft: 8,
+                        padding: 4,
+                        borderRadius: 4,
+                        transition: 'color 0.2s',
+                        cursor: deletingId === session.id ? 'wait' : 'pointer',
+                      }}
+                      onMouseEnter={(e) => {
+                        if (deletingId !== session.id) {
+                          ;(e.currentTarget as HTMLElement).style.color = '#ff4d4f'
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        ;(e.currentTarget as HTMLElement).style.color = '#8c8c8c'
+                      }}
+                    />
+                  )}
+                </div>
+              </List.Item>
             )}
           />
         )}

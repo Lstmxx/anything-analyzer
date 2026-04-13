@@ -2,6 +2,21 @@ import { describe, it, expect } from 'vitest'
 import { SceneDetector } from '../../../src/main/ai/scene-detector'
 import type { FilteredRequest } from '../../../src/shared/types'
 
+function makeRequest(overrides: Partial<FilteredRequest> = {}): FilteredRequest {
+  return {
+    seq: 1,
+    method: 'GET',
+    url: 'https://example.com/api/data',
+    headers: {},
+    body: null,
+    status: 200,
+    responseHeaders: null,
+    responseBody: null,
+    hooks: [],
+    ...overrides,
+  }
+}
+
 describe('SceneDetector', () => {
   const detector = new SceneDetector()
 
@@ -155,5 +170,43 @@ describe('SceneDetector', () => {
     expect(hints.some(h => h.scene === 'login')).toBe(true)
     expect(hints.some(h => h.scene === 'ai-chat')).toBe(true)
     expect(hints.some(h => h.scene === 'auth-token')).toBe(true)
+  })
+
+  it('should detect crypto-encryption scene from crypto hooks', () => {
+    const req = makeRequest({
+      hooks: [{
+        id: 1, session_id: 's1', timestamp: Date.now(),
+        hook_type: 'crypto', function_name: 'crypto.subtle.encrypt',
+        arguments: '[]', result: null, call_stack: null, related_request_id: null,
+      }],
+    })
+    const hints = detector.detect([req])
+    expect(hints.some(h => h.scene === 'crypto-encryption')).toBe(true)
+  })
+
+  it('should detect crypto-encryption scene from crypto_lib hooks', () => {
+    const req = makeRequest({
+      hooks: [{
+        id: 1, session_id: 's1', timestamp: Date.now(),
+        hook_type: 'crypto_lib', function_name: 'CryptoJS.AES.encrypt',
+        arguments: '[]', result: null, call_stack: null, related_request_id: null,
+      }],
+    })
+    const hints = detector.detect([req])
+    expect(hints.some(h => h.scene === 'crypto-encryption' && h.confidence === 'high')).toBe(true)
+  })
+
+  it('should detect crypto-encryption from signature headers', () => {
+    const req = makeRequest({
+      headers: { 'x-signature': 'abc123', 'content-type': 'application/json' },
+    })
+    const hints = detector.detect([req])
+    expect(hints.some(h => h.scene === 'crypto-encryption' && h.confidence === 'medium')).toBe(true)
+  })
+
+  it('should not detect crypto-encryption without crypto indicators', () => {
+    const req = makeRequest()
+    const hints = detector.detect([req])
+    expect(hints.some(h => h.scene === 'crypto-encryption')).toBe(false)
   })
 })

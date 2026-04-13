@@ -48,7 +48,7 @@ export interface CapturedRequest {
 
 // ---- JS Hook Record ----
 
-export type HookType = "fetch" | "xhr" | "crypto" | "cookie_set";
+export type HookType = "fetch" | "xhr" | "crypto" | "crypto_lib" | "cookie_set";
 
 export interface JsHookRecord {
   id: number;
@@ -106,6 +106,13 @@ export interface AuthChainItem {
   consumers: string[]; // 使用该凭据的后续请求路径数组
 }
 
+// ---- Chat Message ----
+
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
 // ---- Browser Tab ----
 
 export interface BrowserTab {
@@ -113,6 +120,36 @@ export interface BrowserTab {
   url: string;
   title: string;
   isActive: boolean;
+}
+
+// ---- Auto Update ----
+
+export type UpdateState =
+  | "idle"
+  | "checking"
+  | "available"
+  | "not-available"
+  | "downloading"
+  | "downloaded"
+  | "error";
+
+export interface UpdateInfo {
+  version: string;
+  releaseNotes?: string;
+}
+
+export interface UpdateProgress {
+  percent: number;
+  bytesPerSecond: number;
+  transferred: number;
+  total: number;
+}
+
+export interface UpdateStatus {
+  state: UpdateState;
+  info?: UpdateInfo;
+  progress?: UpdateProgress;
+  error?: string;
 }
 
 // ---- LLM Provider Config ----
@@ -129,6 +166,41 @@ export interface LLMProviderConfig {
   maxTokens: number;
 }
 
+// ---- Prompt Template ----
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  requirements: string;
+  isBuiltin: boolean;
+  isModified: boolean;
+}
+
+// ---- MCP Server Config ----
+
+interface MCPServerConfigBase {
+  id: string;
+  name: string;
+  enabled: boolean;
+}
+
+export interface MCPServerConfigStdio extends MCPServerConfigBase {
+  transport: "stdio";
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+export interface MCPServerConfigHttp extends MCPServerConfigBase {
+  transport: "streamableHttp";
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export type MCPServerConfig = MCPServerConfigStdio | MCPServerConfigHttp;
+
 // ---- Filtered Request ----
 
 export interface FilteredRequest {
@@ -141,6 +213,16 @@ export interface FilteredRequest {
   responseHeaders: Record<string, string> | null;
   responseBody: string | null;
   hooks: JsHookRecord[];
+}
+
+// ---- Crypto Script Snippet ----
+
+export interface CryptoScriptSnippet {
+  scriptUrl: string;
+  lineRange: [number, number];
+  content: string;
+  matchedPatterns: string[];
+  tier: 1 | 2 | 3;
 }
 
 // ---- Assembled Data ----
@@ -163,6 +245,7 @@ export interface AssembledData {
   sceneHints: SceneHint[]; // 通过规则推理检测的业务场景线索（如注册、登录、AI 对话等）
   streamingRequests: FilteredRequest[]; // 流式通信请求（SSE 或 WebSocket），从 is_streaming/is_websocket 标记判断
   authChain: AuthChainItem[]; // 身份认证链：凭据来源、类型、值及使用者
+  cryptoScripts: CryptoScriptSnippet[]; // 从已捕获的 JS 文件中提取的加密相关代码片段
 }
 
 // ---- Analysis Purpose ----
@@ -172,6 +255,7 @@ export const ANALYSIS_PURPOSES = [
   { label: '逆向 API 协议', value: 'reverse-api', description: '聚焦 API 端点、请求/响应模式、鉴权流程、数据模型、复现代码' },
   { label: '安全审计', value: 'security-audit', description: '聚焦认证安全、敏感数据暴露、CSRF/XSS 风险、权限控制' },
   { label: '性能分析', value: 'performance', description: '聚焦请求时序、冗余请求、资源加载、缓存策略' },
+  { label: 'JS加密逆向', value: 'crypto-reverse', description: '聚焦JS加密算法识别、加密流程还原、密钥分析、Python复现代码' },
   { label: '自定义...', value: 'custom', description: '输入自定义分析指令' },
 ] as const;
 
@@ -202,6 +286,7 @@ export const IPC_CHANNELS = {
   // AI
   AI_ANALYZE: "ai:analyze",
   AI_PROGRESS: "ai:progress",
+  AI_CHAT: "ai:chat",
 
   // Settings
   SETTINGS_GET_LLM: "settings:getLLM",
@@ -222,6 +307,23 @@ export const IPC_CHANNELS = {
   // Capture events (main → renderer)
   CAPTURE_REQUEST: "capture:request",
   CAPTURE_HOOK: "capture:hook",
+
+  // Update
+  APP_VERSION: "app:version",
+  UPDATE_CHECK: "update:check",
+  UPDATE_INSTALL: "update:install",
+  UPDATE_STATUS: "update:status",
+
+  // Prompt Templates
+  TEMPLATES_LIST: "templates:list",
+  TEMPLATES_SAVE: "templates:save",
+  TEMPLATES_DELETE: "templates:delete",
+  TEMPLATES_RESET: "templates:reset",
+
+  // MCP Servers
+  MCP_LIST: "mcp:list",
+  MCP_SAVE: "mcp:save",
+  MCP_DELETE: "mcp:delete",
 } as const;
 
 // ---- Electron API (exposed via contextBridge) ----
@@ -248,6 +350,7 @@ export interface ElectronAPI {
   getReports: (sessionId: string) => Promise<AnalysisReport[]>;
 
   startAnalysis: (sessionId: string, purpose?: string) => Promise<AnalysisReport>;
+  sendFollowUp: (sessionId: string, history: ChatMessage[], userMessage: string) => Promise<string>;
   syncBrowserBounds: (bounds: {
     x: number;
     y: number;
@@ -278,6 +381,23 @@ export interface ElectronAPI {
   onHookCaptured: (callback: (data: JsHookRecord) => void) => void;
   onAnalysisProgress: (callback: (chunk: string) => void) => void;
   removeAllListeners: (channel: string) => void;
+
+  // Auto update
+  getAppVersion: () => Promise<string>;
+  checkForUpdate: () => Promise<void>;
+  installUpdate: () => void;
+  onUpdateStatus: (callback: (status: UpdateStatus) => void) => void;
+
+  // Prompt Templates
+  getPromptTemplates: () => Promise<PromptTemplate[]>;
+  savePromptTemplate: (template: PromptTemplate) => Promise<void>;
+  deletePromptTemplate: (id: string) => Promise<void>;
+  resetPromptTemplate: (id: string) => Promise<void>;
+
+  // MCP Servers
+  getMCPServers: () => Promise<MCPServerConfig[]>;
+  saveMCPServer: (server: MCPServerConfig) => Promise<void>;
+  deleteMCPServer: (id: string) => Promise<void>;
 }
 
 declare global {

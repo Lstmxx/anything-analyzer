@@ -1,8 +1,22 @@
-import { ipcMain, dialog } from "electron";
-import type { LLMProviderConfig } from "@shared/types";
+import { ipcMain, dialog, app } from "electron";
+import type { LLMProviderConfig, MCPServerConfig, PromptTemplate } from "@shared/types";
 import type { SessionManager } from "./session/session-manager";
 import type { AiAnalyzer } from "./ai/ai-analyzer";
 import type { WindowManager } from "./window";
+import type { Updater } from "./updater";
+import type { MCPClientManager } from "./mcp/mcp-manager";
+import {
+  loadTemplates,
+  saveTemplate,
+  deleteTemplate,
+  resetTemplate,
+  findTemplate,
+} from "./prompt-templates";
+import {
+  loadMCPServers,
+  saveMCPServer,
+  deleteMCPServer,
+} from "./mcp/mcp-config";
 import type {
   RequestsRepo,
   JsHooksRepo,
@@ -11,7 +25,6 @@ import type {
 } from "./db/repositories";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
-import { app } from "electron";
 
 /**
  * Register all IPC handlers for communication between renderer and main process.
@@ -20,6 +33,8 @@ export function registerIpcHandlers(deps: {
   sessionManager: SessionManager;
   aiAnalyzer: AiAnalyzer;
   windowManager: WindowManager;
+  updater: Updater;
+  mcpManager: MCPClientManager;
   requestsRepo: RequestsRepo;
   jsHooksRepo: JsHooksRepo;
   storageSnapshotsRepo: StorageSnapshotsRepo;
@@ -29,6 +44,8 @@ export function registerIpcHandlers(deps: {
     sessionManager,
     aiAnalyzer,
     windowManager,
+    updater,
+    mcpManager,
     requestsRepo,
     jsHooksRepo,
     storageSnapshotsRepo,
@@ -68,7 +85,7 @@ export function registerIpcHandlers(deps: {
   });
 
   ipcMain.handle("session:delete", async (_event, sessionId: string) => {
-    sessionManager.deleteSession(sessionId);
+    await sessionManager.deleteSession(sessionId);
   });
 
   // ---- Browser Control ----
@@ -198,8 +215,38 @@ export function registerIpcHandlers(deps: {
         }
       : undefined;
 
-    return aiAnalyzer.analyze(sessionId, config, onProgress, purpose);
+    // 连接所有启用的 MCP 服务器
+    const mcpServers = loadMCPServers();
+    if (mcpServers.some((s) => s.enabled)) {
+      await mcpManager.connectAll(mcpServers);
+    }
+
+    // Resolve template: if purpose matches a template ID, load it
+    const template = purpose ? findTemplate(purpose) : findTemplate("auto");
+    return aiAnalyzer.analyze(sessionId, config, onProgress, purpose, template ?? undefined);
   });
+
+  ipcMain.handle(
+    "ai:chat",
+    async (
+      _event,
+      sessionId: string,
+      history: Array<{ role: string; content: string }>,
+      userMessage: string,
+    ) => {
+      const config = loadLLMConfig();
+      if (!config) throw new Error("LLM provider not configured");
+
+      const win = windowManager.getMainWindow();
+      const onProgress = win
+        ? (chunk: string) => {
+            win.webContents.send("ai:progress", chunk);
+          }
+        : undefined;
+
+      return aiAnalyzer.chat(sessionId, config, history, userMessage, onProgress);
+    },
+  );
 
   // ---- Settings ----
 
@@ -233,6 +280,54 @@ export function registerIpcHandlers(deps: {
       return true;
     },
   );
+
+  // ---- Auto Update ----
+
+  ipcMain.handle("app:version", () => {
+    return app.getVersion();
+  });
+
+  ipcMain.handle("update:check", async () => {
+    updater.checkForUpdates();
+  });
+
+  ipcMain.on("update:install", () => {
+    updater.quitAndInstall();
+  });
+
+  // ---- Prompt Templates ----
+
+  ipcMain.handle("templates:list", async () => {
+    return loadTemplates();
+  });
+
+  ipcMain.handle("templates:save", async (_event, template: PromptTemplate) => {
+    saveTemplate(template);
+  });
+
+  ipcMain.handle("templates:delete", async (_event, id: string) => {
+    deleteTemplate(id);
+  });
+
+  ipcMain.handle("templates:reset", async (_event, id: string) => {
+    resetTemplate(id);
+  });
+
+  // ---- MCP Servers ----
+
+  ipcMain.handle("mcp:list", async () => {
+    return loadMCPServers();
+  });
+
+  ipcMain.handle("mcp:save", async (_event, server: MCPServerConfig) => {
+    saveMCPServer(server);
+  });
+
+  ipcMain.handle("mcp:delete", async (_event, id: string) => {
+    deleteMCPServer(id);
+    // 同时断开该服务器连接
+    await mcpManager.disconnect(id);
+  });
 }
 
 // ---- Config persistence helpers ----
