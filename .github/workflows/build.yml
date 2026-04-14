@@ -80,6 +80,12 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout for release notes
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: RELEASE_NOTES.md
+          sparse-checkout-cone-mode: false
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -88,12 +94,6 @@ jobs:
 
       - name: List artifacts
         run: find artifacts -type f | head -30
-
-      - name: Checkout for release notes
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: RELEASE_NOTES.md
-          sparse-checkout-cone-mode: false
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
