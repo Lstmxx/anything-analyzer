@@ -197,6 +197,8 @@ pnpm test       # run tests
 pnpm build && npx electron-builder --win  # build Windows installer
 ```
 
+> macOS release note: auto-update requires **signed and notarized** installers. Before publishing mac builds from GitHub Actions, configure `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` in repository secrets, otherwise `ShipIt` cannot install updates.
+
 **Requirements:** Node.js >= 18, pnpm, Visual Studio Build Tools (Windows)
 
 ## Tech Stack

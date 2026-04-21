@@ -163,6 +163,14 @@ export interface ChatMessage {
   content: string;
 }
 
+/**
+ * 从 assistant 消息内容中移除 <tool_context> 块（用于前端显示）。
+ * LLM 对话历史中保留该块以维持工具交互上下文。
+ */
+export function stripToolContext(content: string): string {
+  return content.replace(/\n*<tool_context>[\s\S]*?<\/tool_context>\s*$/g, '');
+}
+
 // ---- Browser Tab ----
 
 export interface BrowserTab {

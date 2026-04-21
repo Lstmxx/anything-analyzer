@@ -202,6 +202,8 @@ pnpm test       # 运行测试
 pnpm build && npx electron-builder --win  # 构建 Windows 安装包
 ```
 
+> macOS 发布说明：自动更新依赖**已签名且已公证**的安装包。GitHub Actions 发布 mac 版本前，请在仓库 Secrets 中配置 `CSC_LINK`、`CSC_KEY_PASSWORD`、`APPLE_ID`、`APPLE_APP_SPECIFIC_PASSWORD`、`APPLE_TEAM_ID`，否则 `ShipIt` 无法安装更新。
+
 **环境要求：** Node.js >= 18 · pnpm · Visual Studio Build Tools (Windows)
 
 ## Tech Stack

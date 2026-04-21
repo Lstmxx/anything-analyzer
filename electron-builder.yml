@@ -20,6 +20,12 @@ nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
 mac:
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  type: distribution
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
   target:
     - dmg
     - zip

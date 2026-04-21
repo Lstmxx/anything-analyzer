@@ -59,7 +59,7 @@ export class Updater {
     });
 
     autoUpdater.on("error", (err) => {
-      this.sendStatus({ state: "error", error: err.message });
+      this.sendStatus({ state: "error", error: this.formatError(err.message) });
     });
   }
 
@@ -95,5 +95,15 @@ export class Updater {
     if (!notes) return undefined;
     if (typeof notes === "string") return notes;
     return notes.map((n) => n.note).join("\n");
+  }
+
+  private formatError(message: string): string {
+    if (
+      process.platform === "darwin" &&
+      /code signature|did not satisfy designated requirement|not signed|代码对象根本未签名/i.test(message)
+    ) {
+      return `${message}\n\n当前 macOS 更新包未通过代码签名校验。请从 GitHub Release 手动下载安装最新 DMG，或重新发布已签名/已公证的 macOS 安装包。`;
+    }
+    return message;
   }
 }

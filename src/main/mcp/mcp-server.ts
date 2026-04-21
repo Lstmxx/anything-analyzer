@@ -115,7 +115,8 @@ export async function initMCPServer(
             const transport = transports.get(sessionId)!;
             await transport.close();
             transports.delete(sessionId);
-            chatHistories.delete(sessionId);
+            // Note: chatHistories is keyed by analysis session ID, not transport session ID.
+            // Do NOT delete here — it would be a no-op anyway (wrong key).
           }
           res.writeHead(200);
           res.end();
@@ -148,7 +149,7 @@ export async function initMCPServer(
           transport.onclose = () => {
             if (transport.sessionId) {
               transports.delete(transport.sessionId);
-              chatHistories.delete(transport.sessionId);
+              // chatHistories is keyed by analysis session ID, not transport session ID — skip
               const srv = mcpServers.get(transport.sessionId);
               if (srv) {
                 srv.close().catch(() => {});
@@ -631,6 +632,8 @@ function registerTools(server: McpServer, deps: MCPServerDeps): void {
         undefined,
         selectedSeqs,
       );
+      // Reset chat history so next chat_followup uses the new report
+      chatHistories.delete(sessionId);
       return text({
         id: report.id,
         content: report.report_content,
@@ -680,13 +683,35 @@ function registerTools(server: McpServer, deps: MCPServerDeps): void {
         // Load existing report as context
         const reports = reportsRepo.findBySession(sessionId);
         const lastReport = reports[reports.length - 1];
+
+        // Build system prompt with captured data summary (consistent with IPC path)
+        const requests = requestsRepo.findBySession(sessionId);
+        const hooks = jsHooksRepo.findBySession(sessionId);
+        const reqSummary = requests.slice(0, 50).map((r) => {
+          let path = r.url;
+          try { path = new URL(r.url).pathname; } catch { /* keep full url */ }
+          return `#${r.sequence} ${r.method} ${path} → ${r.status_code ?? '?'}`;
+        }).join('\n');
+
+        const hookSummary = hooks.length > 0
+          ? '\n\nDetected hooks:\n' + hooks.slice(0, 20).map((h) =>
+              `[${h.hook_type}] ${h.function_name}`
+            ).join('\n')
+          : '';
+
+        const contextBlock = reqSummary
+          ? `\n\n<captured_data_summary>\nCaptured ${requests.length} requests:\n${reqSummary}${requests.length > 50 ? `\n... and ${requests.length - 50} more` : ''}${hookSummary}\n</captured_data_summary>`
+          : '';
+
+        const systemContent = `你是一位网站协议分析专家。基于之前的分析报告和捕获数据，回答用户的追问。保持技术精确，用中文回复。\n\n你可以使用 get_request_detail 工具，通过传入请求序号(seq)来查看任意请求的完整详情（请求头、请求体、响应头、响应体）。当用户追问某个具体请求或需要更多细节时，请主动调用此工具获取数据。${contextBlock}`;
+
+        const initialHistory: ChatMessage[] = [
+          { role: "system" as const, content: systemContent },
+        ];
         if (lastReport) {
-          chatHistories.set(sessionId, [
-            { role: "assistant" as const, content: lastReport.report_content },
-          ]);
-        } else {
-          chatHistories.set(sessionId, []);
+          initialHistory.push({ role: "assistant" as const, content: lastReport.report_content });
         }
+        chatHistories.set(sessionId, initialHistory);
       }
 
       const history = chatHistories.get(sessionId)!;

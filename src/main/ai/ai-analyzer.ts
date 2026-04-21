@@ -21,6 +21,12 @@ const PRE_FILTER_MIN_SELECTED = 3;
 const PHASE1_MAX_TOKENS = 1024;
 /** 需要全量请求的分析目的（不跳过任何请求） */
 const SKIP_FILTER_PURPOSES = ["performance"];
+/** 对话历史最大字符数（约 25K tokens），超过时压缩旧消息 */
+const MAX_CHAT_CONTEXT_CHARS = 100_000;
+/** 每条工具结果保留的最大字符数 */
+const TOOL_RESULT_MAX_CHARS = 2000;
+/** 保留最近 N 条 assistant 消息的 tool_context（更早的会被剥离） */
+const KEEP_TOOL_CONTEXT_RECENT = 2;
 
 /** 内置 tool：查看请求详情 */
 const BUILTIN_TOOLS: MCPToolInfo[] = [
@@ -344,6 +350,10 @@ export class AiAnalyzer {
       { role: 'user' as const, content: userMessage },
     ]
 
+    // Trim old messages if total context exceeds limit
+    // Keep: messages[0] (system) + messages[1] (report) + most recent turns
+    await this.compressMessages(messages, MAX_CHAT_CONTEXT_CHARS, config, sessionId, reportId ?? null);
+
     const router = new LLMRouter(config, this.createLogCallback(sessionId, reportId ?? null, 'chat', config))
 
     // Build request lookup for builtin tool
@@ -363,25 +373,145 @@ export class AiAnalyzer {
     const allTools = [...builtinTools, ...mcpTools];
 
     const mcpMgr = this.mcpManager;
+
+    // Collect tool interactions for context preservation
+    const toolInteractions: string[] = [];
     const callTool = async (name: string, args: Record<string, unknown>): Promise<string> => {
+      let result: string;
       if (name === 'get_request_detail') {
         const seq = args.seq as number;
         const req = requestMap.get(seq);
-        if (!req) return `Error: 未找到序号为 ${seq} 的请求`;
-        return this.formatRequestDetail(req);
+        if (!req) {
+          result = `Error: 未找到序号为 ${seq} 的请求`;
+        } else {
+          result = this.formatRequestDetail(req);
+        }
+      } else if (mcpMgr) {
+        result = await mcpMgr.callTool(name, args);
+      } else {
+        throw new Error(`Tool not found: ${name}`);
       }
-      if (mcpMgr) return mcpMgr.callTool(name, args);
-      throw new Error(`Tool not found: ${name}`);
+
+      // Record tool interaction for context preservation across turns
+      const argsStr = JSON.stringify(args);
+      const truncatedResult = result.length > TOOL_RESULT_MAX_CHARS
+        ? result.slice(0, TOOL_RESULT_MAX_CHARS) + `\n...(truncated, ${result.length} chars total)`
+        : result;
+      toolInteractions.push(`[${name}](${argsStr})\n${truncatedResult}`);
+
+      return result;
     };
+
+    let replyContent: string;
 
     if (allTools.length > 0) {
       const result = await router.completeWithTools(messages, allTools, callTool, onProgress, 5);
       this.aiRequestLogRepo.updateLatestTokens(sessionId, 'chat', result.promptTokens, result.completionTokens);
-      return result.content;
+      replyContent = result.content;
+    } else {
+      const result = await router.complete(messages, onProgress);
+      this.aiRequestLogRepo.updateLatestTokens(sessionId, 'chat', result.promptTokens, result.completionTokens);
+      replyContent = result.content;
     }
 
-    const result = await router.complete(messages, onProgress)
-    this.aiRequestLogRepo.updateLatestTokens(sessionId, 'chat', result.promptTokens, result.completionTokens);
-    return result.content
+    // Embed tool interaction context in assistant reply for future turns
+    if (toolInteractions.length > 0) {
+      const ctx = toolInteractions.join('\n---\n');
+      replyContent += `\n\n<tool_context>\n${ctx}\n</tool_context>`;
+    }
+
+    return replyContent;
+  }
+
+  /**
+   * 两级上下文压缩，保留所有对话信息。
+   *
+   * 第一级（无 LLM 调用）：剥离旧 assistant 消息中的 <tool_context>，
+   *   仅保留最近 KEEP_TOOL_CONTEXT_RECENT 条 assistant 消息的工具上下文。
+   *
+   * 第二级（需要 LLM 调用）：如果仍然超限，将最旧的对话轮次
+   *   （messages[2] 到中间某个位置）用 LLM 压缩为一条摘要消息替换。
+   *
+   * 始终保留 messages[0]（system）和 messages[1]（report）。
+   */
+  private async compressMessages(
+    messages: Array<{ role: string; content: string }>,
+    maxChars: number,
+    config: LLMProviderConfig,
+    sessionId: string,
+    reportId: string | null,
+  ): Promise<void> {
+    const totalChars = () => messages.reduce((sum, m) => sum + m.content.length, 0);
+
+    if (totalChars() <= maxChars) return;
+
+    // ---- Tier 1: Strip <tool_context> from older assistant messages ----
+    // Find assistant messages (skip messages[1] which is the initial report)
+    let assistantCount = 0;
+    for (let i = messages.length - 1; i >= 2; i--) {
+      if (messages[i].role === 'assistant') {
+        assistantCount++;
+        if (assistantCount > KEEP_TOOL_CONTEXT_RECENT) {
+          // Strip tool_context from this older assistant message
+          messages[i] = {
+            ...messages[i],
+            content: messages[i].content.replace(/\n*<tool_context>[\s\S]*?<\/tool_context>\s*$/g, ''),
+          };
+        }
+      }
+    }
+
+    if (totalChars() <= maxChars) return;
+
+    // ---- Tier 2: LLM-based summarization of oldest conversation turns ----
+    // Keep at least the most recent 4 messages (2 turns) + system + report
+    const minKeepFromEnd = 4;
+    const conversationMessages = messages.slice(2); // exclude system + report
+    if (conversationMessages.length <= minKeepFromEnd) return; // too few to compress
+
+    // Split: older turns to compress, recent turns to keep
+    const splitIdx = conversationMessages.length - minKeepFromEnd;
+    const toCompress = conversationMessages.slice(0, splitIdx);
+    // Build summary prompt
+    const conversationText = toCompress
+      .map((m) => `[${m.role}]: ${m.content.slice(0, 3000)}`)
+      .join('\n\n');
+
+    const summaryPrompt = [
+      {
+        role: 'system' as const,
+        content: '你是一个对话摘要助手。将以下多轮对话压缩为一段简洁的摘要，保留所有关键信息：讨论过的请求序号、API端点、发现的问题、用户关注的重点。用中文输出。',
+      },
+      {
+        role: 'user' as const,
+        content: `请将以下对话压缩为摘要（保留关键技术细节，尤其是请求序号和具体发现）：\n\n${conversationText}`,
+      },
+    ];
+
+    try {
+      const router = new LLMRouter(config, this.createLogCallback(sessionId, reportId, 'compress', config));
+      const result = await router.complete(summaryPrompt);
+      const summary = result.content;
+
+      if (summary) {
+        // Replace compressed messages with a single summary
+        // Remove old conversation turns (index 2 to 2+splitIdx), insert summary
+        messages.splice(2, splitIdx, {
+          role: 'assistant',
+          content: `<conversation_summary>\n${summary}\n</conversation_summary>`,
+        });
+      }
+    } catch (err) {
+      // Summarization failed — fall back to stripping old messages' content to fit
+      console.warn('Chat history compression failed, falling back to content truncation:', err);
+      for (let i = 2; i < messages.length - minKeepFromEnd && totalChars() > maxChars; i++) {
+        if (messages[i].content.length > 500) {
+          messages[i] = {
+            ...messages[i],
+            content: messages[i].content.slice(0, 500) + '\n...(compressed)',
+          };
+        }
+      }
+    }
   }
 }

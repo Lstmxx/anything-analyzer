@@ -15,11 +15,7 @@ jobs:
           - os: windows-latest
             platform: win
           - os: macos-latest
-            platform: mac-arm64
-            arch: arm64
-          - os: macos-latest
-            platform: mac-x64
-            arch: x64
+            platform: mac
           - os: ubuntu-latest
             platform: linux
 
@@ -47,13 +43,67 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Validate macOS signing secrets
+        if: matrix.platform == 'mac'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=()
+          for var in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!var}" ]; then
+              missing+=("$var")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required macOS signing secrets: ${missing[*]}"
+            exit 1
+          fi
+
       - name: Package for Windows
         if: matrix.platform == 'win'
         run: npx electron-builder --win --publish never
 
       - name: Package for macOS
-        if: startsWith(matrix.platform, 'mac')
-        run: npx electron-builder --mac --${{ matrix.arch }} --publish never
+        if: matrix.platform == 'mac'
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npx electron-builder --mac --x64 --arm64 --publish never
+
+      - name: Verify macOS updater metadata
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          test -f dist/latest-mac.yml
+          cat dist/latest-mac.yml
+          grep -q 'arm64\.zip' dist/latest-mac.yml
+          grep -q 'x64\.zip' dist/latest-mac.yml
+
+      - name: Verify macOS code signatures
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          found=0
+          while IFS= read -r -d '' app_path; do
+            found=1
+            echo "Verifying $app_path"
+            codesign --verify --deep --strict --verbose=2 "$app_path"
+            codesign -dv --verbose=4 "$app_path" 2>&1 | grep -q '^Authority='
+          done < <(find dist -maxdepth 3 -name "Anything Analyzer.app" -print0)
+
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No packaged macOS app bundle found under dist/"
+            exit 1
+          fi
 
       - name: Package for Linux
         if: matrix.platform == 'linux'

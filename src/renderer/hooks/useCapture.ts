@@ -262,6 +262,10 @@ export function useCapture(sessionId: string | null): UseCaptureReturn {
           isChatting: false,
           streamingContent: "",
           chatError: errMsg,
+          // Roll back the optimistically added user message on failure
+          chatHistory: prev.chatHistory.length > 0 && prev.chatHistory[prev.chatHistory.length - 1]?.role === 'user'
+            ? prev.chatHistory.slice(0, -1)
+            : prev.chatHistory,
         }));
       }
     }
